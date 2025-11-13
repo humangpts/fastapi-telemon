@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Prometheus metrics export
 - More scheduler integration examples
 - Improved documentation
+- Grafana dashboard template
 
 ## [1.0.0] - 2025-11-15
 
@@ -25,6 +26,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Smart Rate Limiting**: Prevents alert spam with configurable thresholds
 - **Batch Alerts**: Groups non-critical warnings into digest reports
 - **Pluggable Architecture**: Easy integration via adapters
+- **Fire-and-Forget Alerts**: Non-blocking alert delivery for optimal performance
+- **Markdown Escaping**: Proper escaping of special characters in Telegram messages
+- **Rate Limiting**: Built-in rate limiting to respect Telegram API limits
+- **Security Features**:
+  - Configurable traceback line limits
+  - Path-based monitoring exclusions
+  - Sensitive data protection warnings
+  - Redis security recommendations
 
 ### Features
 - FastAPI middleware for exception monitoring
@@ -35,13 +44,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Abstract adapters for database, queue, and Redis integration
 - Comprehensive documentation and examples
 - Support for multiple background task schedulers (ARQ, APScheduler, Celery)
+- Background task tracking and cleanup
+- Exponential backoff retry logic for Telegram API
+- Multi-worker support with Redis
 
 ### Documentation
 - Comprehensive README with quick start guide
+- Security best practices and warnings
 - Integration examples for different use cases
 - Adapter implementation guide
 - Environment variable documentation
 - Setup instructions for Telegram bot
+- SECURITY.md with detailed security guidelines
+- CONTRIBUTING.md with development guidelines
 
 ### Development
 - MIT License
@@ -49,12 +64,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Type hints throughout
 - Async/await support
 - Comprehensive docstrings
+- 80%+ test coverage
+- Pre-commit hooks for code quality
+- Security scanning with Bandit and Safety
+
+### Security
+- ⚠️ **Important**: Tracebacks may contain sensitive data
+  - Configurable `ALERT_MAX_TRACEBACK_LINES` setting
+  - Path-based exclusions via `IGNORED_PATHS`
+  - Markdown escaping to prevent injection
+- ⚠️ **Multi-Worker Warning**: Redis required for proper deduplication
+- Rate limiting to prevent Telegram API abuse
+- Secure Redis connection examples
+- Private Telegram group recommendations
+
+### Performance
+- Fire-and-forget alert delivery (configurable)
+- Async task tracking with proper cleanup
+- Efficient deduplication using Redis
+- Batch alert processing
+- Rate-limited Telegram API calls
 
 ---
 
 ## Version History Summary
 
-- **1.0.0** - Initial public release with core monitoring features
+- **1.0.0** - Initial public release with core monitoring features and security improvements
 - **Future releases** - Additional integrations, metrics, and features
 
 ## Upgrade Guide
@@ -62,7 +97,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### From Private Repository
 If you're migrating from the internal version:
 
-1. Update imports:
+1. **Update imports:**
    ```python
    # Old
    from app.monitoring import setup_monitoring
@@ -71,7 +106,7 @@ If you're migrating from the internal version:
    from monitoring import setup_monitoring
    ```
 
-2. Implement adapters:
+2. **Implement adapters:**
    ```python
    # Old: Direct model access
    
@@ -85,7 +120,7 @@ If you're migrating from the internal version:
    set_database_adapter(MyDatabaseAdapter())
    ```
 
-3. Update configuration:
+3. **Update configuration:**
    ```python
    # Old: app_settings.MONITORING_*
    
@@ -93,9 +128,68 @@ If you're migrating from the internal version:
    monitoring_config.TELEGRAM_BOT_TOKEN = "..."
    ```
 
+4. **Security review:**
+   - Review `IGNORED_PATHS` for sensitive endpoints
+   - Set `ALERT_MAX_TRACEBACK_LINES` appropriately
+   - Configure Redis for multi-worker deployments
+   - Review Telegram chat permissions
+
+## Breaking Changes
+
+None yet - this is the first public release.
+
+## Migration Notes
+
+### For Production Deployments
+
+**Critical:** If you're deploying with multiple workers, you **must** configure Redis:
+
+```python
+from redis import asyncio as aioredis
+from monitoring import setup_monitoring
+
+redis_client = aioredis.from_url("redis://localhost")
+setup_monitoring(app, redis_client=redis_client)
+```
+
+Without Redis, you'll receive duplicate alerts from each worker!
+
+### Security Configuration
+
+Review and configure these settings before production deployment:
+
+```python
+# Limit sensitive data exposure
+monitoring_config.ALERT_MAX_TRACEBACK_LINES = 5  # or 0 to disable
+
+# Exclude sensitive endpoints
+monitoring_config.IGNORED_PATHS = [
+    "/health",
+    "/metrics",
+    "/auth",       # Add your sensitive paths
+    "/payment",
+    "/admin",
+]
+
+# Use private Telegram groups
+monitoring_config.TELEGRAM_CHAT_ID = "your_private_group_id"
+```
+
 ## Support
 
 For issues, questions, or contributions:
 - 🐛 [Issue Tracker](https://github.com/humangpts/fastapi-telemon/issues)
 - 💬 [Discussions](https://github.com/humangpts/fastapi-telemon/discussions)
+- 🔒 [Security](https://github.com/humangpts/fastapi-telemon/security)
 - 📖 [Documentation](https://github.com/humangpts/fastapi-telemon/tree/main/docs)
+
+## Acknowledgments
+
+Special thanks to:
+- FastAPI community for the excellent framework
+- Contributors who helped test and improve this package
+- Security researchers who provided feedback
+
+---
+
+**Note**: This is a Beta release. While functional and tested, the API may change before v1.0.0. We welcome feedback and contributions!
