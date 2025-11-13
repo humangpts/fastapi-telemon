@@ -259,11 +259,9 @@ Details:
 Error: ValueError: Invalid user data
 
 Traceback:
-```
 File "/app/main.py", line 42, in create_user
     validate_user_data(data)
 ValueError: Invalid user data
-```
 
 ⏰ 2024-01-15 14:30:25 UTC
 ```
