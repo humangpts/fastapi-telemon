@@ -193,6 +193,58 @@ class MonitoringConfig(BaseSettings):
         default=24,
         description="TTL for monitoring data in Redis"
     )
+
+    # Security settings
+    ALERT_SANITIZE_HEADERS: bool = Field(
+        default=True,
+        description="Remove sensitive headers from alerts (Authorization, Cookie, etc.)"
+    )
+    
+    ALERT_SANITIZE_TRACEBACK: bool = Field(
+        default=True,
+        description="Sanitize sensitive data in tracebacks (passwords, tokens, etc.)"
+    )
+    
+    ALERT_SANITIZE_QUERY_PARAMS: bool = Field(
+        default=True,
+        description="Sanitize sensitive query parameters (token, api_key, etc.)"
+    )
+    
+    ALERT_INCLUDE_REQUEST_BODY: bool = Field(
+        default=False,
+        description=(
+            "Include request body in error alerts. "
+            "WARNING: This may expose sensitive data. Only enable in development."
+        )
+    )
+    
+    ALERT_MAX_STRING_LENGTH: int = Field(
+        default=500,
+        description="Maximum length for string values in alerts"
+    )
+    
+    # Additional sensitive header patterns (in addition to defaults)
+    ALERT_ADDITIONAL_SENSITIVE_HEADERS: List[str] = Field(
+        default=[],
+        description="Additional header names to consider sensitive"
+    )
+    
+    # Additional sensitive URL parameter patterns
+    ALERT_ADDITIONAL_SENSITIVE_PARAMS: List[str] = Field(
+        default=[],
+        description="Additional URL parameter names to consider sensitive"
+    )
+    
+    # Telegram connection settings
+    TELEGRAM_TIMEOUT_SECONDS: float = Field(
+        default=10.0,
+        description="Timeout for Telegram API requests"
+    )
+    
+    TELEGRAM_RETRY_ATTEMPTS: int = Field(
+        default=3,
+        description="Number of retry attempts for failed Telegram requests"
+    )
     
     model_config = {
         "env_prefix": "MONITORING_",  # All env vars start with MONITORING_
@@ -214,6 +266,38 @@ class MonitoringConfig(BaseSettings):
             and self.TELEGRAM_BOT_TOKEN is not None
             and self.TELEGRAM_CHAT_ID is not None
         )
+    
+    def get_all_sensitive_headers(self) -> set:
+        """
+        Get complete set of sensitive headers including defaults and user-defined.
+        
+        Returns:
+            Set of lowercase header names to filter
+        """
+        from monitoring.security_utils import SENSITIVE_HEADERS
+        
+        all_headers = set(SENSITIVE_HEADERS)
+        all_headers.update(
+            h.lower() for h in self.ALERT_ADDITIONAL_SENSITIVE_HEADERS
+        )
+        
+        return all_headers
+    
+    def get_all_sensitive_params(self) -> set:
+        """
+        Get complete set of sensitive URL parameters.
+        
+        Returns:
+            Set of lowercase parameter names to filter
+        """
+        default_params = {'token', 'api_key', 'apikey', 'key', 'secret', 'password', 'auth'}
+        
+        all_params = set(default_params)
+        all_params.update(
+            p.lower() for p in self.ALERT_ADDITIONAL_SENSITIVE_PARAMS
+        )
+        
+        return all_params
     
     def should_monitor_exception(self, exception_type: str) -> bool:
         """Check if exception type should be monitored"""
