@@ -62,6 +62,14 @@ class MonitoringConfig(BaseSettings):
         description="Maximum Telegram message length"
     )
     
+    ALERT_FIRE_AND_FORGET: bool = Field(
+        default=True,
+        description=(
+            "Send alerts asynchronously without blocking request response. "
+            "If False, alerts are sent synchronously (may slow down responses)."
+        )
+    )
+    
     # Health check settings
     HEALTH_CHECK_INTERVAL_MINUTES: int = Field(
         default=30,
