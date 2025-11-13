@@ -1,275 +1,233 @@
 # Security Policy
 
-## Supported Versions
+## Overview
 
-We provide security updates for the following versions:
+This monitoring module sends error information to Telegram for alerting purposes. While designed with security in mind, users must be aware of potential security implications when deploying to production.
+
+## Supported Versions
 
 | Version | Supported          |
 | ------- | ------------------ |
 | 1.0.x   | :white_check_mark: |
 | < 1.0   | :x:                |
 
-## Reporting a Vulnerability
+## Security Considerations
 
-**Please do not report security vulnerabilities through public GitHub issues.**
+### 1. Sensitive Data in Alerts
 
-Instead, please report them via:
-- Email: humangpts@users.noreply.github.com
-- GitHub Security Advisories (preferred): [Report a vulnerability](https://github.com/humangpts/fastapi-telemon/security/advisories/new)
+**⚠️ CRITICAL: Error tracebacks and exception messages may contain sensitive information.**
 
-You should receive a response within 48 hours. If for some reason you do not, please follow up via email to ensure we received your original message.
+The module automatically sanitizes the following:
+- HTTP headers (Authorization, Cookie, API keys)
+- Database connection strings
+- Passwords and tokens in error messages
+- AWS credentials
+- Query parameters with sensitive names
 
-Please include the following information:
-- Type of issue (e.g., information disclosure, authentication bypass, etc.)
-- Full paths of source file(s) related to the manifestation of the issue
-- The location of the affected source code (tag/branch/commit or direct URL)
-- Any special configuration required to reproduce the issue
-- Step-by-step instructions to reproduce the issue
-- Proof-of-concept or exploit code (if possible)
-- Impact of the issue, including how an attacker might exploit it
+However, you should still:
 
-## Security Best Practices
-
-### 1. Protect Your Bot Token
-
-**Critical:** Your `TELEGRAM_BOT_TOKEN` is a secret credential.
-
-✅ **DO:**
-- Store in environment variables
-- Use secret management systems (AWS Secrets Manager, HashiCorp Vault, etc.)
-- Rotate tokens periodically
-- Use different tokens for dev/staging/production
-- Keep tokens out of Git history
-
-❌ **DON'T:**
-- Hardcode in source code
-- Commit to version control
-- Share in public channels
-- Log to files
-- Include in error messages
-
-### 2. Traceback Data Exposure
-
-Error tracebacks may contain sensitive information:
-- Database credentials
-- API keys in environment variables
-- User data in local variables
-- Internal file paths
-- Business logic details
-
-**Mitigation:**
-
+#### Configure Alert Verbosity
 ```python
-# Option 1: Reduce traceback lines
-monitoring_config.ALERT_MAX_TRACEBACK_LINES = 5  # or 0 to disable
+# Limit traceback lines sent to Telegram
+monitoring_config.ALERT_MAX_TRACEBACK_LINES = 5  # Default: 15
 
-# Option 2: Ignore sensitive paths
+# Or disable tracebacks entirely for very sensitive apps
+monitoring_config.ALERT_MAX_TRACEBACK_LINES = 0
+```
+
+#### Ignore Sensitive Paths
+```python
 monitoring_config.IGNORED_PATHS = [
-    "/auth",
-    "/payment",
+    "/auth/login",
     "/admin",
+    "/payment/process",
+    "/api/sensitive-endpoint",
 ]
-
-# Option 3: Custom sanitization
-from monitoring import telegram_reporter
-
-class SanitizedReporter(telegram_reporter.__class__):
-    async def send_alert(self, **kwargs):
-        # Sanitize traceback before sending
-        if 'traceback_str' in kwargs:
-            kwargs['traceback_str'] = self._sanitize(kwargs['traceback_str'])
-        return await super().send_alert(**kwargs)
-    
-    def _sanitize(self, traceback: str) -> str:
-        # Remove sensitive patterns
-        import re
-        traceback = re.sub(r'password["\']:\s*["\'][^"\']+["\']', 'password":"***"', traceback)
-        traceback = re.sub(r'token["\']:\s*["\'][^"\']+["\']', 'token":"***"', traceback)
-        return traceback
 ```
 
-### 3. Multi-Worker Security
+#### Review Before Production
+1. Test alerts in staging environment first
+2. Review what data appears in test alerts
+3. Adjust `IGNORED_PATHS` and `IGNORED_EXCEPTIONS` accordingly
 
-**Without Redis:** Each worker has separate deduplication, potentially exposing the same error multiple times.
+### 2. Multi-Worker Deployments
 
-**With Redis:** Ensure Redis is secured:
-- Use authentication (`requirepass`)
-- Bind to localhost or private network only
-- Use TLS for remote connections
-- Regular security updates
-- Monitor for unauthorized access
+**⚠️ Redis is REQUIRED for production deployments with multiple workers/processes.**
+
+Without Redis:
+- ❌ Duplicate alerts from each worker
+- ❌ No shared deduplication
+- ❌ Inaccurate statistics
+- ❌ Potential alert spam
 
 ```python
-# Secure Redis connection
+# ❌ UNSAFE for multi-worker production
+setup_monitoring(app)
+
+# ✅ SAFE for multi-worker production
 from redis import asyncio as aioredis
-
-redis_client = aioredis.from_url(
-    "rediss://username:password@redis-host:6379/0",  # SSL/TLS
-    ssl_cert_reqs="required",
-    ssl_ca_certs="/path/to/ca.crt"
-)
+redis_client = aioredis.from_url("redis://localhost")
+setup_monitoring(app, redis_client=redis_client)
 ```
 
-### 4. Telegram Chat Security
+### 3. Telegram Bot Security
 
-**Protect your alert destination:**
-
-✅ **DO:**
-- Use private groups/channels
-- Enable 2FA on Telegram accounts
-- Limit group membership
-- Review member list regularly
-- Use separate groups per environment
-- Monitor group access logs
-
-❌ **DON'T:**
-- Use public channels for production alerts
-- Share invite links publicly
-- Add unnecessary members
-- Use personal chats for production
-
-### 5. Rate Limiting
-
-**Prevent abuse and API quota exhaustion:**
-
-```python
-# Configure appropriate limits
-monitoring_config.ALERT_RATE_LIMIT_MINUTES = 10
-monitoring_config.BATCH_WINDOW_MINUTES = 15
-
-# Monitor your Telegram API usage
-# Telegram limits: ~30 messages/second per bot
-```
-
-### 6. Data Retention
-
-**Minimize sensitive data lifetime:**
-
-```python
-# Adjust retention
-monitoring_config.REDIS_KEY_TTL_HOURS = 24  # Default
-
-# Clean up old data regularly
-from monitoring import get_redis_adapter
-
-async def cleanup_old_monitoring_data():
-    redis = get_redis_adapter()
-    # Implement custom cleanup logic
-    pass
-```
-
-### 7. Access Control
-
-**Implement proper authentication:**
-
-```python
-from fastapi import Depends, HTTPException
-from fastapi.security import HTTPBearer
-
-security = HTTPBearer()
-
-@app.post("/admin/trigger-alert")
-async def trigger_alert(token = Depends(security)):
-    # Verify token before allowing alert triggers
-    if not verify_admin_token(token.credentials):
-        raise HTTPException(403)
-    
-    await telegram_reporter.send_alert(...)
-```
-
-### 8. Input Validation
-
-**Sanitize user input before logging:**
-
-```python
-from monitoring import telegram_reporter
-
-# ❌ Dangerous - user input in alert
-await telegram_reporter.send_alert(
-    title="User Error",
-    message=f"User {user_input} failed"  # Could contain malicious content
-)
-
-# ✅ Safe - sanitized input
-from html import escape
-
-await telegram_reporter.send_alert(
-    title="User Error",
-    message=f"User {escape(user_input[:100])} failed"  # Limited and escaped
-)
-```
-
-### 9. Dependency Security
-
-**Keep dependencies updated:**
+#### Bot Token Protection
+- **NEVER commit** `TELEGRAM_BOT_TOKEN` to version control
+- Use environment variables or secret management
+- Rotate tokens periodically (every 90 days recommended)
 
 ```bash
-# Check for vulnerabilities
-pip install safety
-safety check
-
-# Update dependencies
-pip install --upgrade fastapi-telemon
-
-# Monitor GitHub security advisories
-# Enable Dependabot on your repository
+# .env (add to .gitignore!)
+MONITORING_TELEGRAM_BOT_TOKEN=your_token_here
+MONITORING_TELEGRAM_CHAT_ID=your_chat_id
 ```
 
-### 10. Production Deployment Checklist
+#### Chat/Channel Security
+- Use **private groups** or channels for production alerts
+- Enable **2-factor authentication** on admin Telegram accounts
+- Limit bot permissions to only **send messages**
+- Use **separate bots** for different environments (dev/staging/prod)
+- Regularly audit group members
 
-Before deploying to production:
+#### Rate Limiting
+Telegram API has rate limits. Respect them:
+```python
+# Prevent hitting rate limits
+monitoring_config.ALERT_RATE_LIMIT_MINUTES = 10  # Min time between same error
+monitoring_config.BATCH_WINDOW_MINUTES = 15      # Batch non-critical alerts
+```
 
-- [ ] Redis deployed and secured
-- [ ] Bot token in secret management system
-- [ ] Private Telegram group configured
-- [ ] Sensitive paths added to `IGNORED_PATHS`
-- [ ] Traceback lines limited or disabled
-- [ ] Rate limits configured
-- [ ] Data retention policies set
-- [ ] Access controls implemented
-- [ ] Security scan performed (`safety check`)
-- [ ] Dependencies up to date
-- [ ] Monitoring tested in staging
-- [ ] Incident response plan documented
-- [ ] Team trained on security practices
+### 4. Data Retention
+
+#### Redis Data
+- Monitoring data expires automatically (default: 24 hours)
+- Adjust retention if needed:
+```python
+monitoring_config.REDIS_KEY_TTL_HOURS = 24  # Adjust as needed
+```
+
+#### Telegram Messages
+- Messages in Telegram are **permanent** unless manually deleted
+- Consider message retention policies for compliance
+- Use private channels with appropriate data handling policies
+
+### 5. Access Control
+
+#### Application Level
+```python
+# Restrict health check endpoint
+@app.get("/health")
+async def health_check(api_key: str = Header(...)):
+    if api_key != os.getenv("HEALTH_CHECK_API_KEY"):
+        raise HTTPException(401)
+    # ... health check logic
+```
+
+#### Telegram Level
+- Create monitoring-specific Telegram accounts
+- Use bot access restrictions in BotFather
+- Implement IP whitelisting for bot API calls if possible
 
 ## Known Limitations
 
-### 1. Traceback Content
+### Automatic Sanitization
 
-We cannot automatically sanitize all sensitive data from tracebacks. You must configure `IGNORED_PATHS` and `ALERT_MAX_TRACEBACK_LINES` appropriately for your application.
+While the module sanitizes many common patterns, it cannot catch everything:
 
-### 2. Telegram Storage
+1. **Custom sensitive fields**: Add your own patterns if needed
+2. **Business logic secrets**: May require custom exception handlers
+3. **PII in variable names**: Could still appear in tracebacks
 
-Messages sent to Telegram are stored on Telegram's servers. Consider this when deciding what information to send.
+### Example: Custom Sanitization
 
-### 3. Redis Security
+```python
+from monitoring.security_utils import SENSITIVE_PATTERNS
 
-We do not implement Redis encryption at rest. Use Redis Enterprise or similar if you need this feature.
+# Add custom patterns
+SENSITIVE_PATTERNS.append(
+    (re.compile(r'customer_id:\s*\d+', re.IGNORECASE), 'customer_id:***')
+)
+```
 
-### 4. No Authentication
+## Reporting a Vulnerability
 
-This package does not provide authentication for Telegram webhooks or admin endpoints. You must implement this yourself.
+If you discover a security vulnerability, please email security@yourproject.com instead of using the issue tracker.
+
+### What to Include
+
+1. Description of the vulnerability
+2. Steps to reproduce
+3. Potential impact
+4. Suggested fix (if any)
+
+### Response Timeline
+
+- **Initial response**: Within 48 hours
+- **Status update**: Within 7 days
+- **Fix timeline**: Depends on severity
+  - Critical: 24-48 hours
+  - High: 7 days
+  - Medium: 30 days
+  - Low: Next release
+
+## Security Best Practices
+
+### Deployment Checklist
+
+Before deploying to production:
+
+- [ ] Redis configured and connected
+- [ ] `TELEGRAM_BOT_TOKEN` in secrets/env vars (not in code)
+- [ ] Using private Telegram group/channel
+- [ ] Tested alerts in staging environment
+- [ ] Reviewed alert content for sensitive data
+- [ ] `IGNORED_PATHS` configured for sensitive endpoints
+- [ ] `ALERT_MAX_TRACEBACK_LINES` set appropriately
+- [ ] Rate limiting configured (`ALERT_RATE_LIMIT_MINUTES`)
+- [ ] Separate bots for different environments
+- [ ] Bot permissions minimized in BotFather
+- [ ] Team members trained on alert handling
+- [ ] Data retention policy documented
+
+### Regular Maintenance
+
+- [ ] Review and rotate Telegram bot token quarterly
+- [ ] Audit Telegram group membership monthly
+- [ ] Review `IGNORED_PATHS` as endpoints change
+- [ ] Test alert sanitization with new features
+- [ ] Monitor Redis memory usage
+- [ ] Review Telegram message history for leaks
+
+### Compliance Considerations
+
+If your application handles:
+- **PII (Personal Identifiable Information)**
+- **PHI (Protected Health Information)**
+- **PCI (Payment Card Information)**
+- **Financial data**
+
+Additional steps required:
+1. Implement custom sanitization for domain-specific data
+2. Consider disabling tracebacks entirely
+3. Use separate, compliant monitoring for sensitive endpoints
+4. Document data flows in privacy policy
+5. Implement alert retention policies
 
 ## Security Updates
 
-We will announce security updates via:
+Subscribe to security announcements:
 - GitHub Security Advisories
-- Release notes in CHANGELOG.md
-- Git tags with `security` label
-
-Subscribe to repository notifications to stay informed.
-
-## Acknowledgments
-
-We appreciate responsible disclosure from the security community. Contributors who report valid security issues will be acknowledged in our security advisories (unless they prefer to remain anonymous).
+- Release notes for security patches
+- Security mailing list (if available)
 
 ## Contact
 
-For security concerns, contact:
-- Security issues: GitHub Security Advisories (preferred)
-- General questions: humangpts@users.noreply.github.com
+- **Security issues**: security@yourproject.com
+- **General support**: GitHub Issues
+- **Urgent security issues**: Contact maintainers directly
 
 ---
 
-Last updated: 2025-11-15
+**Last updated**: 2024-01-15  
+**Version**: 1.0.0
