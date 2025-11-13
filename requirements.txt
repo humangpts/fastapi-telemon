@@ -1,0 +1,12 @@
+# Core dependencies for fastapi-telemon
+fastapi>=0.115.0
+httpx>=0.28.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+tenacity>=9.0.0
+starlette>=0.38.0
+
+# Optional dependencies (install separately if needed)
+# redis>=5.0.0  # For distributed features
+# arq>=0.26.0  # For background task monitoring
+# sqlalchemy>=2.0.0  # For database adapter examples
