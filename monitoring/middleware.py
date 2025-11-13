@@ -8,6 +8,7 @@ import hashlib
 import traceback
 import logging
 import json
+import asyncio
 from typing import Dict, Optional, Any
 from datetime import datetime
 
@@ -161,6 +162,7 @@ class MonitoringMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
         self.deduplicator = ErrorDeduplicator()
         self.enabled = monitoring_config.is_enabled
+        self._background_tasks = set()  # Track background tasks
     
     async def dispatch(self, request: Request, call_next):
         """
@@ -201,8 +203,9 @@ class MonitoringMiddleware(BaseHTTPMiddleware):
             if monitoring_config.MONITOR_SLOW_REQUESTS:
                 elapsed = time.time() - start_time
                 if elapsed > monitoring_config.SLOW_REQUEST_THRESHOLD_SECONDS:
-                    await self._report_slow_request(
-                        request_info, elapsed, user_info
+                    # Fire and forget - don't wait for alert
+                    self._create_background_task(
+                        self._report_slow_request(request_info, elapsed, user_info)
                     )
             
             return response
@@ -211,8 +214,9 @@ class MonitoringMiddleware(BaseHTTPMiddleware):
             # HTTPExceptions are usually handled properly
             # Only report 500+ errors
             if e.status_code >= 500:
-                await self._handle_exception(
-                    e, request_info, user_info, e.status_code
+                # Fire and forget
+                self._create_background_task(
+                    self._handle_exception(e, request_info, user_info, e.status_code)
                 )
             raise
             
@@ -236,18 +240,21 @@ class MonitoringMiddleware(BaseHTTPMiddleware):
             should_alert = await self.deduplicator.should_send_alert(fingerprint)
             
             if should_alert:
-                await self._handle_exception(
-                    e, request_info, user_info, 500
+                # Fire and forget - don't block response
+                self._create_background_task(
+                    self._handle_exception(e, request_info, user_info, 500)
                 )
             
-            # Record for statistics
-            await self.deduplicator.record_error(
-                request_info["path"],
-                500,
-                exception_type
+            # Record for statistics (also fire and forget)
+            self._create_background_task(
+                self.deduplicator.record_error(
+                    request_info["path"],
+                    500,
+                    exception_type
+                )
             )
             
-            # Return generic error response
+            # Return generic error response immediately
             return JSONResponse(
                 status_code=500,
                 content={
@@ -256,6 +263,17 @@ class MonitoringMiddleware(BaseHTTPMiddleware):
                 }
             )
     
+    def _create_background_task(self, coro):
+        """
+        Create background task with proper cleanup.
+        
+        This ensures alerts don't block request responses while
+        also preventing task warnings.
+        """
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+    
     async def _handle_exception(
         self,
         exception: Exception,
@@ -263,7 +281,7 @@ class MonitoringMiddleware(BaseHTTPMiddleware):
         user_info: Optional[Dict[str, Any]],
         status_code: int
     ):
-        """Send exception alert to Telegram"""
+        """Send exception alert to Telegram (fire and forget)"""
         try:
             # Get traceback
             tb_str = traceback.format_exc()
@@ -307,7 +325,7 @@ class MonitoringMiddleware(BaseHTTPMiddleware):
         elapsed_time: float,
         user_info: Optional[Dict[str, Any]]
     ):
-        """Report slow request"""
+        """Report slow request (fire and forget)"""
         from monitoring import get_redis_adapter
         redis_adapter = get_redis_adapter()
         
