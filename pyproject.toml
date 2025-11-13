@@ -10,10 +10,10 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = {text = "MIT"}
 authors = [
-    {name = "HumanGPTs", email = "verxotyroff.tutu@gmail.com"}
+    {name = "HumanGPTs", email = "humangpts@users.noreply.github.com"}
 ]
 maintainers = [
-    {name = "HumanGPTs", email = "verxotyroff.tutu@gmail.com"}
+    {name = "HumanGPTs", email = "humangpts@users.noreply.github.com"}
 ]
 keywords = [
     "fastapi",
