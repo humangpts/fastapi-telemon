@@ -59,6 +59,7 @@ class ErrorDeduplicator:
     async def should_send_alert(self, fingerprint: str) -> bool:
         """
         Check if alert should be sent based on rate limiting.
+        Uses atomic Redis operations to prevent race conditions.
         
         Returns:
             True if alert should be sent, False if rate limited
@@ -72,38 +73,62 @@ class ErrorDeduplicator:
         if redis_adapter:
             try:
                 redis_key = monitoring_config.get_redis_key("error", fingerprint)
+                ttl = self.rate_limit_minutes * 60
                 
-                # Check if key exists
-                last_sent = await redis_adapter.get(redis_key)
+                # ATOMIC OPERATION: Try to set key only if it doesn't exist
+                # This prevents race condition where multiple workers check at the same time
+                was_set = await redis_adapter.set(
+                    redis_key,
+                    str(current_time),
+                    ex=ttl,
+                    nx=True  # Only set if key does NOT exist
+                )
                 
-                if last_sent:
-                    last_sent_time = float(last_sent)
-                    time_diff = current_time - last_sent_time
+                if not was_set:
+                    # Key already exists - we're rate limited
+                    # Try to get the existing value to log how long ago it was sent
+                    try:
+                        last_sent = await redis_adapter.get(redis_key)
+                        if last_sent:
+                            last_sent_time = float(last_sent)
+                            time_diff = current_time - last_sent_time
+                            logger.debug(
+                                f"Error {fingerprint} rate limited, "
+                                f"last sent {time_diff:.1f}s ago"
+                            )
+                    except (ValueError, TypeError):
+                        # If we can't parse the timestamp, just log that it's rate limited
+                        logger.debug(f"Error {fingerprint} rate limited")
                     
-                    if time_diff < (self.rate_limit_minutes * 60):
-                        logger.debug(f"Error {fingerprint} rate limited, last sent {time_diff:.1f}s ago")
-                        return False
+                    return False
                 
-                # Set new timestamp with TTL
-                ttl = self.rate_limit_minutes * 60 * 2  # Double the rate limit for TTL
-                await redis_adapter.setex(redis_key, ttl, str(current_time))
-                
+                # Key was successfully set - we can send alert
+                logger.debug(f"Error {fingerprint} allowing alert (first or expired)")
                 return True
                 
             except Exception as e:
-                logger.warning(f"Redis unavailable for deduplication: {e}, using local cache")
+                logger.warning(
+                    f"Redis unavailable for deduplication: {e}, "
+                    "using local cache"
+                )
+                # Fall through to local cache
         
-        # Fallback to local cache
+        # Fallback to local cache (not distributed, only works for single worker)
         if fingerprint in self.local_cache:
             last_sent_time = self.local_cache[fingerprint]
             time_diff = current_time - last_sent_time
             
             if time_diff < (self.rate_limit_minutes * 60):
+                logger.debug(
+                    f"Error {fingerprint} rate limited (local cache), "
+                    f"last sent {time_diff:.1f}s ago"
+                )
                 return False
         
+        # Not in cache or expired - allow alert
         self.local_cache[fingerprint] = current_time
         
-        # Clean old entries from local cache
+        # Clean old entries from local cache to prevent memory leak
         if len(self.local_cache) > 1000:
             cutoff_time = current_time - (self.rate_limit_minutes * 60)
             self.local_cache = {
