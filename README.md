@@ -1,6 +1,8 @@
-# FastAPI Monitoring
+# FastAPI TeleMon
 
 Production-ready monitoring solution for FastAPI applications with Telegram alerts.
+
+> **⚠️ Important:** This package is currently in **Beta**. While functional and tested, the API may change before v1.0.0. Redis is strongly recommended for production use with multiple workers.
 
 ## ✨ Features
 
@@ -12,6 +14,7 @@ Production-ready monitoring solution for FastAPI applications with Telegram aler
 - 🎯 **Smart Rate Limiting**: Prevents alert spam with configurable thresholds
 - 📦 **Batch Alerts**: Groups non-critical warnings into digest reports
 - 🔌 **Pluggable Architecture**: Easy integration via adapters
+- 🚀 **Non-Blocking Alerts**: Fire-and-forget reporting doesn't slow down responses
 
 ## 🚀 Quick Start
 
@@ -19,6 +22,21 @@ Production-ready monitoring solution for FastAPI applications with Telegram aler
 
 ```bash
 pip install fastapi-telemon
+```
+
+For Redis support (recommended for production):
+```bash
+pip install fastapi-telemon[redis]
+```
+
+For ARQ background task monitoring:
+```bash
+pip install fastapi-telemon[arq]
+```
+
+For all optional dependencies:
+```bash
+pip install fastapi-telemon[all]
 ```
 
 ### Basic Setup
@@ -53,6 +71,100 @@ TELEGRAM_CHAT_ID=your_chat_id
 # Optional settings
 MONITORING_SLOW_REQUEST_THRESHOLD_SECONDS=3.0
 MONITORING_ALERT_RATE_LIMIT_MINUTES=10
+MONITORING_ALERT_FIRE_AND_FORGET=true
+```
+
+## 🔒 Security Considerations
+
+**⚠️ IMPORTANT: Read this before deploying to production**
+
+### 1. Sensitive Data in Tracebacks
+
+Error tracebacks sent to Telegram may contain **sensitive information**:
+- Database credentials in connection strings
+- API keys and tokens
+- User data in variables
+- Internal paths and system information
+
+**Recommendations:**
+```python
+# Option 1: Reduce traceback lines
+monitoring_config.ALERT_MAX_TRACEBACK_LINES = 5
+
+# Option 2: Disable tracebacks entirely for sensitive endpoints
+monitoring_config.IGNORED_PATHS = [
+    "/auth/login",
+    "/payment/process", 
+    "/admin/users",
+]
+
+# Option 3: Custom error sanitization
+# Implement your own exception handler for sensitive routes
+from fastapi import HTTPException
+
+@app.exception_handler(Exception)
+async def custom_exception_handler(request, exc):
+    # Log error internally without sending to Telegram
+    if request.url.path.startswith("/sensitive"):
+        logger.error(f"Sensitive error: {exc}")
+        raise HTTPException(status_code=500)
+    raise exc
+```
+
+### 2. Multi-Worker Deployments
+
+**⚠️ Redis is REQUIRED for production deployments with multiple workers!**
+
+Without Redis, duplicate alerts will be sent from each worker:
+- Same error reported multiple times
+- No shared deduplication cache
+- Inaccurate statistics
+
+```python
+# ❌ Single-worker only (dev/testing)
+setup_monitoring(app)
+
+# ✅ Production with multiple workers
+from redis import asyncio as aioredis
+
+redis_client = aioredis.from_url("redis://localhost")
+setup_monitoring(app, redis_client=redis_client)
+```
+
+**Deployment checklist:**
+- [ ] Redis configured and running
+- [ ] Redis connection in `setup_monitoring()`
+- [ ] Health checks for Redis enabled
+- [ ] Review `IGNORED_PATHS` for sensitive endpoints
+- [ ] Test alert deduplication with multiple workers
+- [ ] Set appropriate `ALERT_MAX_TRACEBACK_LINES`
+
+### 3. Telegram Chat Security
+
+- **Use private groups** or channels for production alerts
+- **Enable 2FA** on your Telegram account
+- **Limit bot permissions** to only send messages
+- Consider using **separate bots** for different environments
+- **Rotate bot tokens** periodically
+
+### 4. Rate Limiting
+
+Telegram API has rate limits. Configure accordingly:
+
+```python
+monitoring_config.ALERT_RATE_LIMIT_MINUTES = 10  # Dedupe same errors
+monitoring_config.BATCH_WINDOW_MINUTES = 15      # Batch non-critical
+```
+
+### 5. Data Retention
+
+Monitoring data in Redis expires automatically, but consider:
+
+```python
+# Adjust retention periods
+monitoring_config.REDIS_KEY_TTL_HOURS = 24  # Default
+
+# Or manually clean up old keys periodically
 ```
 
 ## 📖 Documentation
@@ -60,11 +172,13 @@ MONITORING_ALERT_RATE_LIMIT_MINUTES=10
 ### Setting up Telegram Bot
 
 1. Create a bot via [@BotFather](https://t.me/botfather)
-2. Get your bot token
-3. Add bot to your channel/group
+2. Get your bot token (keep it secret!)
+3. Add bot to your private group/channel
 4. Get chat ID (use [@userinfobot](https://t.me/userinfobot) or check bot logs)
 
-### With Redis (Recommended)
+**Security tip:** Use a dedicated private group for each environment.
+
+### With Redis (Recommended for Production)
 
 Redis enables distributed deduplication and statistics:
 
@@ -75,6 +189,12 @@ from monitoring import setup_monitoring
 redis_client = aioredis.from_url("redis://localhost")
 setup_monitoring(app, redis_client=redis_client)
 ```
+
+**Why Redis is important:**
+- Shared deduplication across all workers
+- Accurate statistics aggregation
+- Health check history
+- Batch alert coordination
 
 ### With Database Statistics
 
@@ -153,15 +273,19 @@ async def my_background_task(ctx):
 |---------------------|---------|-------------|
 | `MONITORING_ENABLED` | `true` | Enable/disable monitoring |
 | `MONITORING_ENV` | `development` | Environment name (appears in alerts) |
-| `TELEGRAM_BOT_TOKEN` | - | Your Telegram bot token |
-| `TELEGRAM_CHAT_ID` | - | Target chat/channel ID |
+| `TELEGRAM_BOT_TOKEN` | - | Your Telegram bot token (required) |
+| `TELEGRAM_CHAT_ID` | - | Target chat/channel ID (required) |
+| `MONITORING_ALERT_FIRE_AND_FORGET` | `true` | Send alerts async without blocking |
 | `MONITORING_ALERT_RATE_LIMIT_MINUTES` | `10` | Cooldown between duplicate alerts |
+| `MONITORING_ALERT_MAX_TRACEBACK_LINES` | `15` | Max traceback lines (security!) |
 | `MONITORING_SLOW_REQUEST_THRESHOLD_SECONDS` | `3.0` | Threshold for slow request alerts |
 | `MONITORING_HEALTH_CHECK_INTERVAL_MINUTES` | `30` | Health check frequency |
 | `MONITORING_DAILY_REPORT_ENABLED` | `true` | Enable daily statistics reports |
 | `MONITORING_DAILY_REPORT_HOUR` | `9` | Hour to send daily report (UTC) |
+| `MONITORING_IGNORED_PATHS` | `/health,/metrics,...` | Paths to ignore |
+| `MONITORING_IGNORED_EXCEPTIONS` | `HTTPException,...` | Exception types to ignore |
 
-See [Configuration Guide](docs/configuration.md) for all options.
+See `.env.example` for complete configuration.
 
 ## 📊 What Gets Monitored
 
@@ -217,7 +341,7 @@ from monitoring import deduplicated
 
 @deduplicated(key="daily_cleanup", ttl=86400)
 async def cleanup_old_data():
-    # Runs once per day across all workers
+    # Runs once per day across all workers (requires Redis)
     pass
 ```
 
@@ -240,6 +364,17 @@ async def health_check():
         "redis": redis_healthy
     }
 ```
+
+### Synchronous Alerts (Debugging)
+
+For debugging, you can disable fire-and-forget mode:
+
+```python
+# This will block until alert is sent (useful for testing)
+monitoring_config.ALERT_FIRE_AND_FORGET = False
+```
+
+**Note:** Only use this in development/testing!
 
 ## 📸 Screenshots
 
@@ -309,12 +444,16 @@ ruff check .
 
 - Python 3.12+
 - FastAPI
-- Redis (optional, but recommended)
+- Redis (optional but **strongly recommended for production**)
 - Telegram Bot
 
 ## 🤝 Contributing
 
 Contributions welcome! Please check our [Contributing Guide](CONTRIBUTING.md).
+
+## 📝 Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for version history.
 
 ## 📄 License
 
@@ -332,6 +471,10 @@ Built with:
 - 📖 [Documentation](docs/)
 - 🐛 [Issue Tracker](https://github.com/humangpts/fastapi-telemon/issues)
 - 💬 [Discussions](https://github.com/humangpts/fastapi-telemon/discussions)
+
+## ⭐ Star History
+
+If this project helps you, please consider giving it a star!
 
 ---
 
