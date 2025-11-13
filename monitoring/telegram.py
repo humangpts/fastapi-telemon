@@ -5,6 +5,7 @@ Handles sending alerts and reports to Telegram.
 
 import logging
 import asyncio
+import re
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 from enum import Enum
@@ -30,6 +31,27 @@ class MessageFormat(str, Enum):
     HTML = "HTML"
 
 
+def escape_markdown(text: str) -> str:
+    """
+    Escape special characters for Telegram Markdown.
+    
+    Telegram Markdown special characters: _ * [ ] ( ) ~ ` > # + - = | { } . !
+    
+    Args:
+        text: Text to escape
+        
+    Returns:
+        Escaped text safe for Markdown
+    """
+    # Characters that need escaping in Telegram Markdown
+    special_chars = ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']
+    
+    for char in special_chars:
+        text = text.replace(char, f'\\{char}')
+    
+    return text
+
+
 class TelegramReporter:
     """
     Telegram bot client for sending monitoring alerts.
@@ -42,6 +64,11 @@ class TelegramReporter:
         self.thread_id = monitoring_config.TELEGRAM_THREAD_ID
         self.base_url = f"https://api.telegram.org/bot{self.bot_token}"
         self.client: Optional[httpx.AsyncClient] = None
+        
+        # Rate limiting state
+        self._rate_limit_lock = asyncio.Lock()
+        self._last_send_time = 0.0
+        self._min_interval = 0.1  # 100ms between messages
         
         # Emoji mapping for visual alerts
         self.emoji_map = {
@@ -81,6 +108,17 @@ class TelegramReporter:
             await self.client.aclose()
             self.client = None
     
+    async def _rate_limit_wait(self):
+        """Wait to respect rate limits"""
+        async with self._rate_limit_lock:
+            now = asyncio.get_event_loop().time()
+            time_since_last = now - self._last_send_time
+            
+            if time_since_last < self._min_interval:
+                await asyncio.sleep(self._min_interval - time_since_last)
+            
+            self._last_send_time = asyncio.get_event_loop().time()
+    
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(min=1, max=10),
@@ -98,7 +136,7 @@ class TelegramReporter:
         Send message to Telegram.
         
         Args:
-            text: Message text
+            text: Message text (will be escaped if using Markdown)
             level: Alert level for emoji and formatting
             parse_mode: Telegram parse mode
             disable_notification: Silent notification
@@ -117,6 +155,9 @@ class TelegramReporter:
         if not self.client:
             logger.error("TelegramReporter HTTP client is not initialized.")
             return False
+        
+        # Rate limiting
+        await self._rate_limit_wait()
         
         # Truncate if too long
         if len(text) > monitoring_config.ALERT_MAX_MESSAGE_LENGTH:
@@ -153,11 +194,22 @@ class TelegramReporter:
             
             return True
             
+        except httpx.HTTPStatusError as e:
+            # Check for rate limiting
+            if e.response.status_code == 429:
+                retry_after = int(e.response.headers.get('Retry-After', 60))
+                logger.warning(f"Telegram rate limit hit, retry after {retry_after}s")
+                await asyncio.sleep(retry_after)
+                raise  # Will be retried
+            
+            logger.error(f"HTTP error sending Telegram message: {e}")
+            # Don't retry for client errors
+            if e.response.status_code < 500:
+                return False
+            raise  # Will be retried for 5xx
+            
         except httpx.HTTPError as e:
             logger.error(f"Failed to send Telegram message: {e}")
-            # Don't retry for client errors
-            if isinstance(e, httpx.HTTPStatusError) and e.response.status_code < 500:
-                raise  # Will not be retried
             raise  # Will be retried
         except Exception as e:
             logger.error(f"Unexpected error sending Telegram message: {e}")
@@ -190,37 +242,42 @@ class TelegramReporter:
         emoji = self.emoji_map.get(level, "📢")
         
         lines = [
-            f"{emoji} *{title}*",
-            f"_{monitoring_config.MONITORING_ENV.upper()}_",
+            f"{emoji} *{escape_markdown(title)}*",
+            f"_{escape_markdown(monitoring_config.MONITORING_ENV.upper())}_",
             "",
-            message,
+            escape_markdown(message),
         ]
         
         # Add details if provided
         if details:
             lines.append("\n*Details:*")
             for key, value in details.items():
-                # Escape special markdown characters
-                # value_str = str(value).replace("_", "\\_").replace("*", "\\*")
-                value_str = str(value)
-                lines.append(f"• {key}: `{value_str}`")
+                # Escape key and value separately
+                safe_key = escape_markdown(str(key))
+                safe_value = escape_markdown(str(value))
+                lines.append(f"• {safe_key}: `{safe_value}`")
         
         # Add error info if provided
         if error:
-            lines.append(f"\n*Error:* `{type(error).__name__}: {str(error)}`")
+            error_type = escape_markdown(type(error).__name__)
+            error_msg = escape_markdown(str(error)[:500])  # Limit error message length
+            lines.append(f"\n*Error:* `{error_type}: {error_msg}`")
         
         # Add traceback if provided
         if traceback_str:
             # Truncate traceback if needed
             max_lines = monitoring_config.ALERT_MAX_TRACEBACK_LINES
-            tb_lines = traceback_str.split("\n")[:max_lines]
-            tb_text = "\n".join(tb_lines)
-            
-            lines.append("\n*Traceback:*")
-            lines.append(f"```\n{tb_text}\n```")
+            if max_lines > 0:
+                tb_lines = traceback_str.split("\n")[:max_lines]
+                tb_text = "\n".join(tb_lines)
+                
+                lines.append("\n*Traceback:*")
+                # Use code block - no escaping needed inside ```
+                lines.append(f"```\n{tb_text}\n```")
         
         # Add timestamp
-        lines.append(f"\n{self.emoji_map['time']} _{datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}_")
+        timestamp = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
+        lines.append(f"\n{self.emoji_map['time']} _{escape_markdown(timestamp)}_")
         
         # Send message
         full_text = "\n".join(lines)
@@ -257,13 +314,15 @@ class TelegramReporter:
         for component, is_healthy in components.items():
             emoji = "✅" if is_healthy else "❌"
             icon = self.emoji_map.get(component.lower(), "")
-            status_lines.append(f"{emoji} {icon} {component}: {'OK' if is_healthy else 'FAILED'}")
+            status = "OK" if is_healthy else "FAILED"
+            status_lines.append(f"{emoji} {icon} {escape_markdown(component)}: {status}")
         
         # Build message
         message = "\n".join(status_lines)
         
         if errors:
-            message += "\n\n*Errors:*\n" + "\n".join(f"• {e}" for e in errors)
+            message += "\n\n*Errors:*\n"
+            message += "\n".join(f"• {escape_markdown(e)}" for e in errors)
         
         return await self.send_alert(
             title="System Health Check",
@@ -286,8 +345,8 @@ class TelegramReporter:
         """
         lines = [
             f"{self.emoji_map['chart']} *Daily Report*",
-            f"_{monitoring_config.MONITORING_ENV.upper()}_",
-            f"_Date: {datetime.utcnow().strftime('%Y-%m-%d')}_",
+            f"_{escape_markdown(monitoring_config.MONITORING_ENV.upper())}_",
+            f"_Date: {escape_markdown(datetime.utcnow().strftime('%Y-%m-%d'))}_",
             "",
         ]
         
@@ -314,13 +373,15 @@ class TelegramReporter:
             if stats['errors'].get('by_type'):
                 lines.append("• By type:")
                 for error_type, count in stats['errors']['by_type'].items():
-                    lines.append(f"  - {error_type}: {count}")
+                    safe_type = escape_markdown(error_type)
+                    lines.append(f"  \\- {safe_type}: {count}")
             lines.append("")
         
         # System stats
         if "system" in stats:
             lines.append("*System*")
-            lines.append(f"• Uptime: {stats['system'].get('uptime', 'N/A')}")
+            uptime = escape_markdown(str(stats['system'].get('uptime', 'N/A')))
+            lines.append(f"• Uptime: {uptime}")
             lines.append(f"• Disk usage: {stats['system'].get('disk_usage', 'N/A')}%")
             lines.append(f"• Memory usage: {stats['system'].get('memory_usage', 'N/A')}%")
         
