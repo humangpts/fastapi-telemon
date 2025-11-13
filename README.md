@@ -330,8 +330,8 @@ Built with:
 ## 💬 Support
 
 - 📖 [Documentation](docs/)
-- 🐛 [Issue Tracker](https://github.com/yourusername/fastapi-telemon/issues)
-- 💬 [Discussions](https://github.com/yourusername/fastapi-telemon/discussions)
+- 🐛 [Issue Tracker](https://github.com/humangpts/fastapi-telemon/issues)
+- 💬 [Discussions](https://github.com/humangpts/fastapi-telemon/discussions)
 
 ---
 
