@@ -326,52 +326,10 @@ class MonitoringMiddleware(BaseHTTPMiddleware):
                     }
                 )
                 
-                # Optionally: send alert about monitoring failure
-                # (but be careful not to create infinite loop!)
-                try:
-                    if monitoring_config.is_enabled:
-                        # Use asyncio.create_task to avoid blocking
-                        asyncio.create_task(
-                            self._alert_monitoring_failure(e, coro)
-                        )
-                except Exception:
-                    # If we can't even create the alert task, just log
-                    logger.error("Failed to create alert for monitoring failure")
         
         task.add_done_callback(_handle_task_result)
         
         return task
-    
-    async def _alert_monitoring_failure(self, error: Exception, coro):
-        """
-        Send alert about monitoring system failure.
-        
-        This is a last-resort alert - it means the monitoring itself is broken.
-        Only send once per hour to avoid spam.
-        """
-        try:
-            # Deduplicate monitoring failures
-            fingerprint = f"monitoring_failure_{type(error).__name__}"
-            
-            # Check if we already alerted recently
-            should_alert = await self.deduplicator.should_send_alert(fingerprint)
-            
-            if should_alert:
-                from monitoring.telegram import telegram_reporter
-                
-                await telegram_reporter.send_alert(
-                    title="Monitoring System Error",
-                    message="The monitoring system encountered an error",
-                    level=AlertLevel.WARNING,
-                    details={
-                        "Error Type": type(error).__name__,
-                        "Task": str(coro)[:100],
-                    },
-                    error=error
-                )
-        except Exception as e:
-            # Ultimate fallback - just log
-            logger.error(f"Failed to send monitoring failure alert: {e}")
     
     async def _handle_exception(
         self,
